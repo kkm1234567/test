@@ -24,7 +24,10 @@ DST_DB = dict(
     user="DB_WO_BUNNY",
     password="Thrkflxkd72&",
     database="dbDwCollectorBuilding",
-    charset="utf8mb4"
+    charset="utf8mb4",
+    connect_timeout=300,
+    read_timeout=600,
+    write_timeout=600,
 )
 
 BATCH_SIZE = 5000
@@ -109,12 +112,12 @@ def deduplicate_with_hash(dst_conn, dst_table):
     read_cursor.close()
     
     print(f"Phase 1 완료: {processed:,} rows processed, {len(hash_dict):,} unique records")
-    print(f"Phase 2: Truncating destination table and inserting deduplicated data...")
+    print(f"Phase 2: Clearing destination table and inserting deduplicated data...")
     
-    # Truncate destination table
-    dst_cursor.execute(f"TRUNCATE TABLE {dst_table}")
+    # Clear destination table
+    dst_cursor.execute(f"DELETE FROM {dst_table}")
     dst_conn.commit()
-    print(f"  → Table {dst_table} truncated")
+    print(f"  → Table {dst_table} cleared")
 
     # Insert deduplicated data with proper DuplicationRecodeCnt
     batch = []
