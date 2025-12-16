@@ -53,9 +53,14 @@ def deduplicate_with_hash(dst_conn):
     # 임시 테이블 생성: hash_value별 중복 개수 저장
     temp_table = f"{DST_TABLE}_temp_dedup"
     print(f"\n임시 테이블 생성: {temp_table}")
-    cur.execute(f"DROP TABLE IF EXISTS {temp_table}")
+    try:
+        cur.execute(f"DELETE FROM {temp_table}")
+        dst_conn.commit()
+    except:
+        pass
+    
     cur.execute(f"""
-        CREATE TEMPORARY TABLE {temp_table} (
+        CREATE TEMPORARY TABLE IF NOT EXISTS {temp_table} (
             hash_value VARCHAR(16) PRIMARY KEY,
             dedup_count INT DEFAULT 1,
             row_blob LONGBLOB
@@ -147,9 +152,12 @@ def deduplicate_with_hash(dst_conn):
             print(f"  → {inserted:,}/{unique_count:,} unique records inserted")
             batch.clear()
     
-    if batch:
-        cur.executemany(insert_sql, batch)
+    if batch: (DELETE로 처리)
+    try:
+        cur.execute(f"DELETE FROM {temp_table}")
         dst_conn.commit()
+    except:
+        passit()
         inserted += len(batch)
     
     # 임시 테이블 정리
