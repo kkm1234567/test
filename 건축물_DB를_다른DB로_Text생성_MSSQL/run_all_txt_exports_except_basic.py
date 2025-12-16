@@ -13,10 +13,11 @@ except Exception:  # pragma: no cover
 BASE_DIR = Path(__file__).resolve().parent
 
 # Scripts to run (기본개요 excluded)
+
 SCRIPT_NAMES = [
-    # "부속지번_건축물_DB를_다른DB로_txt.py",
-    # "오수정화시설_건축물_DB를_다른DB로_txt.py",
-    # "전유공용면적_건축물_DB를_다른DB로_txt.py",
+    "부속지번_건축물_DB를_다른DB로_txt.py",
+    "오수정화시설_건축물_DB를_다른DB로_txt.py",
+    "전유공용면적_건축물_DB를_다른DB로_txt.py",
     "전유부_건축물_DB를_다른DB로_txt.py",
     "주택가격_건축물_DB를_다른DB로_txt.py",
     "지역지구구역_건축물_DB를_다른DB로_txt.py",

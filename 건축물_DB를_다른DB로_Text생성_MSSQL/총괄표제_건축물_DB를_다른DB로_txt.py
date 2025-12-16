@@ -5,7 +5,7 @@ import pyodbc
 
 MSSQL_SERVER = "localhost"
 MSSQL_DATABASE = "EAIS_202104"
-TABLE_NAME = "건축물대장_총괄표제"
+TABLE_NAME = "건축물대장_총괄표제부"
 OUTPUT_DIR = r"C:\PTR\Prime\Collect\CollectApi\storage\hub_go_kr\202104"
 OUTPUT_FILE = "건축물대장_총괄표제.txt"
 BATCH_SIZE = 5000

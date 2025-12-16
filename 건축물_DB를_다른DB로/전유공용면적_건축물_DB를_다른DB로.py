@@ -2,6 +2,7 @@ import MySQLdb
 import MySQLdb.cursors
 import time
 import traceback
+import xxhash
 
 # ---------------------------------------
 # 1) 테이블 매핑
@@ -29,7 +30,7 @@ DST_DB = dict(
     charset="utf8mb4"
 )
 
-BATCH_SIZE = 5000
+BATCH_SIZE = 50000
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds
 
@@ -280,14 +281,6 @@ def migrate_table(src_conn, dst_conn, src_table, dst_table):
 
     print(f"총 {total_rows:,} rows 이관 예정")
 
-    # SRC 스트리밍 커서: select full SOURCE_COLS (we will map explicitly)
-    src_cursor = src_conn.cursor(MySQLdb.cursors.SSCursor)
-    # execute with parameter if resuming
-    if max_dst_pk is not None:
-        src_cursor.execute(select_sql_with_where, (max_dst_pk,))
-    else:
-        src_cursor.execute(select_sql_with_where)
-
     # If the user-requested positional mapping (exclude SOURCE_EXCLUDE then
     # append two NULLs) yields the exact destination column count, prefer
     # that positional mapping. Otherwise fall back to the explicit name
@@ -318,6 +311,71 @@ def migrate_table(src_conn, dst_conn, src_table, dst_table):
 
     print("Insert SQL 준비 완료")
     print("Insert SQL:", insert_sql)
+
+    # ===== Pass 1: 해시 카운트 계산 (메모리 경량: 해시 -> 카운트만 저장) =====
+    print("\nPass 1: 해시 카운트 계산 중...")
+    # 해시 계산에서 제외할 대상 컬럼들 (목적지 기준)
+    skip_cols_dst = {"BuildingUseAreaCd", "DuplicationRecodeCnt", "CreateDateTime", "OriginDocumentMonth"}
+    # 목적지 컬럼 인덱스 추출
+    try:
+        idx_hash = dst_col_names.index("BuildingUseAreaCd")
+    except ValueError:
+        idx_hash = None
+    try:
+        idx_dup = dst_col_names.index("DuplicationRecodeCnt")
+    except ValueError:
+        idx_dup = None
+
+    # SRC 스트리밍 커서 (Pass 1)
+    src_cursor_pass1 = src_conn.cursor(MySQLdb.cursors.SSCursor)
+    if max_dst_pk is not None:
+        src_cursor_pass1.execute(select_sql_with_where, (max_dst_pk,))
+    else:
+        src_cursor_pass1.execute(select_sql_with_where)
+
+    hash_count = {}
+    rows_counted = 0
+    while True:
+        row = src_cursor_pass1.fetchone()
+        if row is None:
+            break
+        src_values = dict(zip(SOURCE_COLS, row))
+        # 목적지 행을 동일하게 구성 (해시/중복수는 제외 값 계산을 위해 임시 구성)
+        new_row_list_tmp = []
+        for dst_col in dst_col_names:
+            src_col = mapping.get(dst_col)
+            val = None if src_col is None else src_values.get(src_col)
+            if val is None and dst_meta.get(dst_col, {}).get('Null') == 'NO':
+                default = dst_meta.get(dst_col, {}).get('Default')
+                if default is not None:
+                    val = default
+                else:
+                    t = dst_meta.get(dst_col, {}).get('Type', '').lower()
+                    val = 0 if any(x in t for x in ('int','decimal','numeric','float','double')) else ''
+            new_row_list_tmp.append(val)
+        # 해시 파츠 구성 (skip 대상 제외)
+        hash_parts = []
+        for col_name, val in zip(dst_col_names, new_row_list_tmp):
+            if col_name in skip_cols_dst:
+                continue
+            hash_parts.append('' if val is None else str(val))
+        hash_value = xxhash.xxh64('|'.join(hash_parts).encode('utf-8')).hexdigest()
+        hash_count[hash_value] = hash_count.get(hash_value, 0) + 1
+        rows_counted += 1
+        if rows_counted % 1000000 == 0:
+            print(f"  → {rows_counted:,} rows counted, {len(hash_count):,} unique hashes")
+
+    src_cursor_pass1.close()
+    print(f"Pass 1 완료: {rows_counted:,} rows, {len(hash_count):,} unique hashes")
+
+    # ===== Pass 2: 실제 이관 (해시키/중복수 삽입 포함) =====
+    print("\nPass 2: 데이터 이관 중...")
+    # SRC 스트리밍 커서 (Pass 2)
+    src_cursor = src_conn.cursor(MySQLdb.cursors.SSCursor)
+    if max_dst_pk is not None:
+        src_cursor.execute(select_sql_with_where, (max_dst_pk,))
+    else:
+        src_cursor.execute(select_sql_with_where)
 
     batch = []
     inserted = 0
@@ -359,6 +417,18 @@ def migrate_table(src_conn, dst_conn, src_table, dst_table):
                         val = ''
 
             new_row_list.append(val)
+
+        # 해시 계산 및 컬럼 반영
+        hash_parts = []
+        for col_name, val in zip(dst_col_names, new_row_list):
+            if col_name in skip_cols_dst:
+                continue
+            hash_parts.append('' if val is None else str(val))
+        hash_value = xxhash.xxh64('|'.join(hash_parts).encode('utf-8')).hexdigest()
+        if idx_hash is not None:
+            new_row_list[idx_hash] = hash_value
+        if idx_dup is not None:
+            new_row_list[idx_dup] = hash_count.get(hash_value, 1)
 
         new_row = tuple(new_row_list)
         # final validation (should match dst_col_count)

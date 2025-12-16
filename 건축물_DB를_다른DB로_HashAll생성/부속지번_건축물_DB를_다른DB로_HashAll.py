@@ -17,9 +17,9 @@ DST_DB = dict(
     password="Thrkflxkd72&",
     database="dbDwCollectorBuilding",
     charset="utf8mb4",
-    connect_timeout=300,
-    read_timeout=600,
-    write_timeout=600,
+    connect_timeout=3600,
+    read_timeout=3600,
+    write_timeout=3600,
 )
 
 
