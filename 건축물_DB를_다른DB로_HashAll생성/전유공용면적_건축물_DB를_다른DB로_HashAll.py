@@ -8,6 +8,7 @@ DST_TABLE = "tCollectorBuildingUseArea"
 PK_COLS = ("BuildingLedgerCd", "BuildingUseAreaCd")
 DUP_COUNT_COL = "DuplicationRecodeCnt"
 BATCH_SIZE = 5000
+CHUNK_SIZE = 100000  # 청크 크기
 
 DST_DB = dict(
     host="192.168.10.244",
@@ -22,7 +23,7 @@ DST_DB = dict(
 
 
 def deduplicate_with_hash(dst_conn):
-    print(f"\n=== Processing {DST_TABLE} with HashAll deduplication ===")
+    print(f"\n=== Processing {DST_TABLE} with Chunked Deduplication ===")
 
     cur = dst_conn.cursor()
     cur.execute(f"DESCRIBE {DST_TABLE}")
@@ -49,22 +50,19 @@ def deduplicate_with_hash(dst_conn):
     if DUP_COUNT_COL:
         skip_cols.add(DUP_COUNT_COL)
 
-    # Phase 1: 모든 데이터 읽어서 hash 계산
+    # ===== PASS 1: hash -> count 맵 구축 (메모리 가벼움) =====
+    print("\nPass 1: Counting duplicate hashes...")
     read_cursor = dst_conn.cursor(MySQLdb.cursors.SSCursor)
     read_cursor.execute(select_sql)
     
-    hash_dict = {}
-    processed = 0
-    start = time.time()
-    
-    print("Phase 1: Reading and hashing rows...")
+    hash_count = {}  # hash_value -> count only
+    total_rows = 0
     
     while True:
         row = read_cursor.fetchone()
         if row is None:
             break
         
-        # hash 계산
         hash_parts = []
         for col_name, val in zip(col_names, row):
             if col_name in skip_cols:
@@ -72,65 +70,86 @@ def deduplicate_with_hash(dst_conn):
             hash_parts.append("" if val is None else str(val))
         
         hash_value = xxhash.xxh64("|".join(hash_parts).encode("utf-8")).hexdigest()
+        hash_count[hash_value] = hash_count.get(hash_value, 0) + 1
+        total_rows += 1
         
-        # row 데이터 준비
-        final_row = list(row)
-        final_row[pk2_idx] = hash_value
-        if dup_idx is not None:
-            final_row[dup_idx] = 1
-        
-        # hash_dict에 저장
-        if hash_value in hash_dict:
-            hash_dict[hash_value]['count'] += 1
-        else:
-            hash_dict[hash_value] = {
-                'row': tuple(final_row),
-                'count': 1
-            }
-        
-        processed += 1
-        if processed % 100000 == 0:
-            print(f"  → {processed:,} rows processed, unique hashes: {len(hash_dict):,}, memory: {len(hash_dict)} items")
+        if total_rows % 500000 == 0:
+            print(f"  → {total_rows:,} rows counted, {len(hash_count):,} unique hashes")
     
     read_cursor.close()
+    unique_count = len(hash_count)
+    print(f"Pass 1 완료: {total_rows:,} rows, {unique_count:,} unique hashes")
     
-    print(f"\nPhase 1 완료: {processed:,} rows processed, {len(hash_dict):,} unique records")
-    print("Phase 2: Clearing destination table and inserting deduplicated data...")
+    # ===== PASS 2: 청크 단위로 읽으면서 삽입 =====
+    print("\nPass 2: Clearing destination table and inserting deduplicated data...")
     
     cur.execute(f"DELETE FROM {DST_TABLE}")
     dst_conn.commit()
     print(f"  → Table {DST_TABLE} cleared")
     
-    # Phase 2: 최종 데이터 삽입
+    read_cursor = dst_conn.cursor(MySQLdb.cursors.SSCursor)
+    read_cursor.execute(select_sql)
+    
+    processed_rows = {}  # hash_value -> True (처리 완료 표시)
     batch = []
     inserted = 0
+    start = time.time()
     
-    for data in hash_dict.values():
-        row_list = list(data['row'])
-        if dup_idx is not None:
-            row_list[dup_idx] = data['count']
-        batch.append(tuple(row_list))
+    print("Pass 2: Reading and inserting in chunks...")
+    
+    while True:
+        chunk_rows = read_cursor.fetchmany(CHUNK_SIZE)
+        if not chunk_rows:
+            break
         
-        if len(batch) >= BATCH_SIZE:
-            cur.executemany(insert_sql, batch)
-            dst_conn.commit()
-            inserted += len(batch)
-            print(f"  → {inserted:,}/{len(hash_dict):,} unique records inserted")
-            batch.clear()
+        for row in chunk_rows:
+            hash_parts = []
+            for col_name, val in zip(col_names, row):
+                if col_name in skip_cols:
+                    continue
+                hash_parts.append("" if val is None else str(val))
+            
+            hash_value = xxhash.xxh64("|".join(hash_parts).encode("utf-8")).hexdigest()
+            
+            # 첫 번째 나온 행만 처리 (중복은 skip)
+            if hash_value in processed_rows:
+                continue
+            
+            processed_rows[hash_value] = True
+            
+            # 행 데이터 준비
+            final_row = list(row)
+            final_row[pk2_idx] = hash_value
+            if dup_idx is not None:
+                final_row[dup_idx] = hash_count[hash_value]  # Pass 1에서 계산한 count
+            
+            batch.append(tuple(final_row))
+            
+            if len(batch) >= BATCH_SIZE:
+                cur.executemany(insert_sql, batch)
+                dst_conn.commit()
+                inserted += len(batch)
+                print(f"  → {inserted:,}/{unique_count:,} unique records inserted")
+                batch.clear()
+        
+        print(f"  → Processed {len(processed_rows):,}/{unique_count:,} unique records")
     
     if batch:
         cur.executemany(insert_sql, batch)
         dst_conn.commit()
         inserted += len(batch)
     
+    read_cursor.close()
+    
     # 메모리 해제
-    hash_dict.clear()
+    hash_count.clear()
+    processed_rows.clear()
     gc.collect()
     
     elapsed = time.time() - start
-    print(f"\n완료! 원본 {processed:,} rows → 중복 제거 후 {inserted:,} unique rows 삽입 ({elapsed:.2f}초)")
-    if processed:
-        print(f"중복 제거율: {((processed - inserted) / processed * 100):.2f}%")
+    print(f"\n완료! 원본 {total_rows:,} rows → 중복 제거 후 {inserted:,} unique rows 삽입 ({elapsed:.2f}초)")
+    if total_rows:
+        print(f"중복 제거율: {((total_rows - inserted) / total_rows * 100):.2f}%")
     
     cur.close()
 
