@@ -30,8 +30,6 @@ DST_DB = dict(
 )
 
 BATCH_SIZE = 5000
-MAX_RETRIES = 3
-RETRY_DELAY = 5  # seconds
 
 # ---------------------------------------
 # 3) SRC 컬럼 정의 (원본에서 가져올 컬럼 순서)
