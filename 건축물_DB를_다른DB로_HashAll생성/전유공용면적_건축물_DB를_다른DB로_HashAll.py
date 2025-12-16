@@ -2,13 +2,12 @@ import MySQLdb
 import MySQLdb.cursors
 import time
 import xxhash
-import pickle
+import gc
 
 DST_TABLE = "tCollectorBuildingUseArea"
 PK_COLS = ("BuildingLedgerCd", "BuildingUseAreaCd")
 DUP_COUNT_COL = "DuplicationRecodeCnt"
 BATCH_SIZE = 5000
-CHUNK_SIZE = 50000  # 한 번에 메모리에 로드할 행 수
 
 DST_DB = dict(
     host="192.168.10.244",
@@ -23,14 +22,14 @@ DST_DB = dict(
 
 
 def deduplicate_with_hash(dst_conn):
-    print(f"\n=== Processing {DST_TABLE} with Chunked Deduplication ===")
+    print(f"\n=== Processing {DST_TABLE} with HashAll deduplication ===")
 
     cur = dst_conn.cursor()
     cur.execute(f"DESCRIBE {DST_TABLE}")
     desc = cur.fetchall()
     col_names = [d[0] for d in desc]
     col_count = len(col_names)
-    print(f"컬럼 수: {col_count}")
+    print(f"대상 테이블 컬럼 수: {col_count}")
 
     missing_pk = [c for c in PK_COLS if c not in col_names]
     if missing_pk:
@@ -50,106 +49,73 @@ def deduplicate_with_hash(dst_conn):
     if DUP_COUNT_COL:
         skip_cols.add(DUP_COUNT_COL)
 
-    # 임시 테이블 생성: hash_value별 중복 개수 저장
-    temp_table = f"{DST_TABLE}_temp_dedup"
-    print(f"\n임시 테이블 생성: {temp_table}")
-    try:
-        cur.execute(f"DELETE FROM {temp_table}")
-        dst_conn.commit()
-    except:
-        pass
-    
-    cur.execute(f"""
-        CREATE TEMPORARY TABLE IF NOT EXISTS {temp_table} (
-            hash_value VARCHAR(16) PRIMARY KEY,
-            dedup_count INT DEFAULT 1,
-            row_blob LONGBLOB
-        ) ENGINE=MEMORY DEFAULT CHARSET=utf8mb4
-    """)
-    dst_conn.commit()
-
-    # Phase 1: 청크 단위로 읽으면서 hash 계산 및 임시 테이블에 저장
+    # Phase 1: 모든 데이터 읽어서 hash 계산
     read_cursor = dst_conn.cursor(MySQLdb.cursors.SSCursor)
     read_cursor.execute(select_sql)
     
+    hash_dict = {}
     processed = 0
     start = time.time()
     
-    print("\nPhase 1: Chunked hashing and storing to temp table...")
+    print("Phase 1: Reading and hashing rows...")
     
     while True:
-        chunk_rows = read_cursor.fetchmany(CHUNK_SIZE)
-        if not chunk_rows:
+        row = read_cursor.fetchone()
+        if row is None:
             break
         
-        # 청크 내에서 hash 계산 및 저장
-        for row in chunk_rows:
-            hash_parts = []
-            for col_name, val in zip(col_names, row):
-                if col_name in skip_cols:
-                    continue
-                hash_parts.append("" if val is None else str(val))
-            
-            hash_value = xxhash.xxh64("|".join(hash_parts).encode("utf-8")).hexdigest()
-            
-            # row 데이터 pickle로 저장 (첫 번째 나온 행만 저장)
-            final_row = list(row)
-            final_row[pk2_idx] = hash_value
-            if dup_idx is not None:
-                final_row[dup_idx] = 1
-            
-            row_blob = pickle.dumps(tuple(final_row))
-            
-            # 임시 테이블에 INSERT
-            # 이미 있으면 count만 증가, 없으면 새로 저장
-            try:
-                cur.execute(f"""
-                    INSERT INTO {temp_table} (hash_value, dedup_count, row_blob)
-                    VALUES (%s, 1, %s)
-                    ON DUPLICATE KEY UPDATE dedup_count = dedup_count + 1
-                """, (hash_value, row_blob))
-            except Exception as e:
-                print(f"Error inserting hash {hash_value}: {e}")
-            
-            processed += 1
+        # hash 계산
+        hash_parts = []
+        for col_name, val in zip(col_names, row):
+            if col_name in skip_cols:
+                continue
+            hash_parts.append("" if val is None else str(val))
         
-        # 배치 커밋
-        dst_conn.commit()
-        print(f"  → {processed:,} rows processed and stored to temp table")
+        hash_value = xxhash.xxh64("|".join(hash_parts).encode("utf-8")).hexdigest()
+        
+        # row 데이터 준비
+        final_row = list(row)
+        final_row[pk2_idx] = hash_value
+        if dup_idx is not None:
+            final_row[dup_idx] = 1
+        
+        # hash_dict에 저장
+        if hash_value in hash_dict:
+            hash_dict[hash_value]['count'] += 1
+        else:
+            hash_dict[hash_value] = {
+                'row': tuple(final_row),
+                'count': 1
+            }
+        
+        processed += 1
+        if processed % 100000 == 0:
+            print(f"  → {processed:,} rows processed, unique hashes: {len(hash_dict):,}, memory: {len(hash_dict)} items")
     
     read_cursor.close()
     
-    # 임시 테이블에서 통계 조회
-    cur.execute(f"SELECT COUNT(*), SUM(dedup_count) FROM {temp_table}")
-    unique_count, total_count = cur.fetchone()
-    print(f"\nPhase 1 완료: {total_count:,} rows processed, {unique_count:,} unique records")
-    
-    # Phase 2: 원본 테이블 삭제 및 최종 데이터 삽입
+    print(f"\nPhase 1 완료: {processed:,} rows processed, {len(hash_dict):,} unique records")
     print("Phase 2: Clearing destination table and inserting deduplicated data...")
     
     cur.execute(f"DELETE FROM {DST_TABLE}")
     dst_conn.commit()
     print(f"  → Table {DST_TABLE} cleared")
     
-    # Phase 3: 임시 테이블에서 읽어서 최종 삽입
-    cur.execute(f"SELECT row_blob, dedup_count FROM {temp_table} ORDER BY hash_value")
-    rows = cur.fetchall()
-    
+    # Phase 2: 최종 데이터 삽입
     batch = []
     inserted = 0
     
-    for row_blob, dedup_count in rows:
-        row_tuple = pickle.loads(row_blob)
-        row_list = list(row_tuple)
+    for data in hash_dict.values():
+        row_list = list(data['row'])
         if dup_idx is not None:
-            row_list[dup_idx] = dedup_count
+            row_list[dup_idx] = data['count']
         batch.append(tuple(row_list))
         
         if len(batch) >= BATCH_SIZE:
             cur.executemany(insert_sql, batch)
             dst_conn.commit()
             inserted += len(batch)
-            print(f"  → {inserted:,}/{unique_count:,} unique records inserted")
+            print(f"  → {inserted:,}/{len(hash_dict):,} unique records inserted")
             batch.clear()
     
     if batch:
@@ -157,17 +123,14 @@ def deduplicate_with_hash(dst_conn):
         dst_conn.commit()
         inserted += len(batch)
     
-    # 임시 테이블 정리 (DELETE로 처리)
-    try:
-        cur.execute(f"DELETE FROM {temp_table}")
-        dst_conn.commit()
-    except:
-        pass
+    # 메모리 해제
+    hash_dict.clear()
+    gc.collect()
     
     elapsed = time.time() - start
-    print(f"\n완료! 원본 {total_count:,} rows → 중복 제거 후 {inserted:,} unique rows 삽입 ({elapsed:.2f}초)")
-    if total_count:
-        print(f"중복 제거율: {((total_count - inserted) / total_count * 100):.2f}%")
+    print(f"\n완료! 원본 {processed:,} rows → 중복 제거 후 {inserted:,} unique rows 삽입 ({elapsed:.2f}초)")
+    if processed:
+        print(f"중복 제거율: {((processed - inserted) / processed * 100):.2f}%")
     
     cur.close()
 
