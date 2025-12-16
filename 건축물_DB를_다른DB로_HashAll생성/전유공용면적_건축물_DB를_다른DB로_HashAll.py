@@ -152,17 +152,17 @@ def deduplicate_with_hash(dst_conn):
             print(f"  → {inserted:,}/{unique_count:,} unique records inserted")
             batch.clear()
     
-    if batch: (DELETE로 처리)
+    if batch:
+        cur.executemany(insert_sql, batch)
+        dst_conn.commit()
+        inserted += len(batch)
+    
+    # 임시 테이블 정리 (DELETE로 처리)
     try:
         cur.execute(f"DELETE FROM {temp_table}")
         dst_conn.commit()
     except:
-        passit()
-        inserted += len(batch)
-    
-    # 임시 테이블 정리
-    cur.execute(f"DROP TABLE {temp_table}")
-    dst_conn.commit()
+        pass
     
     elapsed = time.time() - start
     print(f"\n완료! 원본 {total_count:,} rows → 중복 제거 후 {inserted:,} unique rows 삽입 ({elapsed:.2f}초)")
@@ -176,7 +176,5 @@ if __name__ == "__main__":
     print("DB 연결 중...")
     dst_conn = MySQLdb.connect(**DST_DB)
     deduplicate_with_hash(dst_conn)
-    dst_conn.close()
-    print("\n=== 중복 제거 완료 ===")
     dst_conn.close()
     print("\n=== 중복 제거 완료 ===")
