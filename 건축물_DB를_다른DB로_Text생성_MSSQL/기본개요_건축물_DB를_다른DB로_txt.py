@@ -9,7 +9,7 @@ import pyodbc
 MSSQL_SERVER = "localhost"  # 필요 시 ".\\SQLEXPRESS" 등으로 변경
 MSSQL_DATABASE = "EAIS_202104"
 TABLE_NAME = "건축물대장_기본개요"
-OUTPUT_DIR = r"C:\PTR\Prime\Collect\CollectApi\storage"
+OUTPUT_DIR = r"C:\PTR\Prime\Collect\CollectApi\storage\hub_go_kr\202104"
 OUTPUT_FILE = "건축물대장_기본개요.txt"
 BATCH_SIZE = 5000
 LOG_EVERY = 100000
@@ -44,11 +44,15 @@ def export_to_txt():
     )
     columns = [row[0] for row in cursor.fetchall()]
 
+    target_col = "도로명대지위치"
+    target_idx = columns.index(target_col) if target_col in columns else None
+
     col_list = ", ".join([f"[{c}]" for c in columns])
     select_sql = f"SELECT {col_list} FROM [{MSSQL_DATABASE}].[dbo].[{TABLE_NAME}]"
 
     print(f"쿼리 실행 중... -> {select_sql}")
     cursor.execute(select_sql)
+    cursor.arraysize = BATCH_SIZE
 
     total_rows = 0
     start = time.time()
@@ -59,14 +63,16 @@ def export_to_txt():
             if not rows:
                 break
 
-            lines = []
             for row in rows:
-                # None을 빈 문자열로 치환 후 | 로 연결
-                line = "|".join(["" if v is None else str(v) for v in row])
-                lines.append(line)
+                row_list = ["" if v is None else str(v) for v in row]
 
-            f.write("\n".join(lines))
-            f.write("\n")
+                # '도로명대지위치' 값은 항상 앞에 공백을 하나 둔다
+                if target_idx is not None:
+                    val = row_list[target_idx]
+                    if not val.startswith(" "):
+                        row_list[target_idx] = " " + val
+
+                f.write("|".join(row_list) + "\n")
 
             total_rows += len(rows)
             if total_rows % LOG_EVERY == 0:

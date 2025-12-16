@@ -20,16 +20,16 @@ BATCH_SIZE = 5000
 
 # 테이블 매핑: MariaDB 테이블 → txt 파일명
 TABLE_MAP = {
-    "eais_01_기본개요_bcp": "건축물대장_기본개요.txt",
-    "eais_02_총괄표제부_bcp": "건축물대장_총괄표제.txt",
-    "eais_03_표제부_bcp": "건축물대장_표제부.txt",
-    "eais_04_층별개요_bcp": "건축물대장_층별개요.txt",
-    "eais_05_부속지번_bcp": "건축물대장_부속지번.txt",
-    "eais_06_전유부_bcp": "건축물대장_전유부.txt",
-    "eais_07_전유공용면적_bcp": "건축물대장_전유공용면적.txt",
-    "eais_08_주택가격_bcp": "건축물대장_주택가격.txt",
-    "eais_09_오수정화시설_bcp": "건축물대장_오수정화시설.txt",
-    "eais_10_지역지구구역_bcp": "건축물대장_지역지구구역.txt",
+    # "eais_01_기본개요_bcp": "건축물대장_기본개요.txt",
+    # "eais_02_총괄표제부_bcp": "건축물대장_총괄표제.txt",
+    # "eais_03_표제부_bcp": "건축물대장_표제부.txt",
+    # "eais_04_층별개요_bcp": "건축물대장_층별개요.txt",
+    "eais_09_부속지번_bcp": "건축물대장_부속지번.txt",
+    "eais_05_전유부_bcp": "건축물대장_전유부.txt",
+    "eais_06_전유공용면적_bcp": "건축물대장_전유공용면적.txt",
+    "eais_10_주택가격_bcp": "건축물대장_주택가격.txt",
+    "eais_07_오수정화시설_bcp": "건축물대장_오수정화시설.txt",
+    "eais_08_지역지구구역_bcp": "건축물대장_지역지구구역.txt",
 }
 
 
@@ -51,6 +51,9 @@ def export_table_to_txt(src_conn, table_name, output_file):
     cursor.execute(f"DESCRIBE `{table_name}`")
     columns = [row[0] for row in cursor.fetchall()]
     print(f"컬럼 수: {len(columns)}, 컬럼: {columns}")
+
+    target_col = "도로명_대지_위치"
+    target_idx = columns.index(target_col) if target_col in columns else None
     
     # Streaming cursor로 모든 행 읽기
     read_cursor = src_conn.cursor(MySQLdb.cursors.SSCursor)
@@ -69,8 +72,15 @@ def export_table_to_txt(src_conn, table_name, output_file):
                 break
             
             for row in rows:
-                # NULL 처리, pipe로 구분
-                line = "|".join("" if v is None else str(v) for v in row)
+                row_list = ["" if v is None else str(v) for v in row]
+
+                # '도로명_대지_위치' 값은 항상 앞에 공백을 하나 둔다
+                if target_idx is not None:
+                    val = row_list[target_idx]
+                    if not val.startswith(" "):
+                        row_list[target_idx] = " " + val
+
+                line = "|".join(row_list)
                 f.write(line + "\n")
                 total_written += 1
             
