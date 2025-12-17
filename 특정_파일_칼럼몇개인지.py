@@ -1,6 +1,6 @@
 import os
 
-path = r"C:\PTR\Prime\Collect\CollectApi\storage\hub_go_kr\tCollectorBuildingHousePrice\202009\org.txt"
+path = r"C:\PTR\Prime\Collect\CollectApi\storage\hub_go_kr\tCollectorBuildingTitle\202009\org.txt"
 delimiter = "|"
 bad = []
 
